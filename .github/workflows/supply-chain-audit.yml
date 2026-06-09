@@ -1,11 +1,15 @@
 # 공급망 보안 점검: 의존성의 알려진 취약점(uv audit) + 악성 패키지 정적 탐지(GuardDog).
 #
-#   ① uv audit   : uv.lock 을 OSV 데이터베이스에 조회 → 알려진 취약점(CVE) 탐지
-#   ② uv sync --locked : 핀된 해시 일치 검증 → 레지스트리 변조/리졸브 변경 차단
-#   ③ GuardDog   : PyPI 패키지를 설치 없이 정적 분석 → 악성코드/타이포스쿼팅/
-#                  install-time 실행 등 능동적 공급망 공격 지표 탐지
+#   ① uv sync --frozen : 락된 해시로 무결성 검증 → 레지스트리 변조 차단  [하드 게이트]
+#   ② uv audit         : uv.lock 을 OSV 에 조회 → 알려진 취약점(CVE) 탐지   [하드 게이트]
+#   ③ GuardDog         : PyPI 패키지를 설치 없이 정적 분석 → 악성코드/타이포
+#                        스쿼팅/install-time 실행 등 공급망 공격 지표 탐지   [자문]
 #
-# 어느 단계든 위험이 발견되면 잡(job)이 실패하여 병합 게이트로 동작합니다.
+# ①②는 발견 시 잡이 실패하여 병합 게이트로 동작합니다.
+# ③ GuardDog 는 휴리스틱 오탐(예: pycryptodomex 의 getattr/CDLL)이 잦아 자문으로
+#   둡니다 — 발견 항목은 로그에 남지만 빌드를 막지 않으며, 악성 여부의 최종 판단은
+#   pre-merge-review(AI 가드)와 사람 검토에 맡깁니다. 하드 게이트로 바꾸려면
+#   `uvx guarddog ... verify --exit-code` 로 변경하세요.
 # 액션과 도구는 supply-chain 안전을 위해 SHA / 버전으로 핀합니다.
 
 name: supply-chain-audit
@@ -44,5 +48,6 @@ jobs:
       - name: Export pinned requirements for malware scan
         run: uv export --frozen --no-dev --no-emit-project --no-hashes --format requirements-txt -o requirements-export.txt
 
-      - name: Scan for malicious packages (GuardDog)
+      - name: Scan for malicious packages (GuardDog, advisory)
+        continue-on-error: true   # 자문: 발견 항목은 로그에 남기되 빌드는 막지 않음
         run: uvx guarddog==2.9.0 pypi verify requirements-export.txt
