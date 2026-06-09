@@ -35,8 +35,8 @@ jobs:
         with:
           enable-cache: true
 
-      - name: Verify lockfile integrity (pinned hashes)
-        run: uv sync --locked --no-install-project
+      - name: Verify locked dependency integrity (pinned hashes)
+        run: uv sync --frozen --no-install-project
 
       - name: Audit known vulnerabilities (OSV)
         run: uv audit
