@@ -1,0 +1,139 @@
+# 릴리즈: 공급망 게이트 통과 시에만, 그리고 버전이 바뀐 경우에만 단일 실행파일을 빌드해
+# GitHub Release 로 배포한다.
+#
+#   - guard : uv sync --frozen(무결성) + uv audit(OSV) = 하드 게이트. 실패 시 릴리즈 중단.
+#             GuardDog 는 자문(빌드 안 막음).
+#   - decide: pyproject.toml 의 version 을 읽어, 같은 v<version> 릴리즈가 이미 있으면 스킵
+#             (= 변경 없으면 릴리즈 안 함).
+#   - build : flet pack(PyInstaller)으로 Linux/Windows/macOS 단일 실행파일 생성.
+#             uv 는 환경 구성 + 패키저 구동 역할(uv 자체는 실행파일을 못 만듦).
+#   - release: 빌드 산출물을 v<version> 태그로 GitHub Release 에 첨부.
+#
+# 수동 점검용 workflow_dispatch(dry_run) 제공 — 빌드만 하고 릴리즈는 만들지 않음.
+# 모든 액션은 supply-chain 안전을 위해 SHA 로 핀한다.
+
+name: release
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: "빌드만 수행하고 릴리즈는 생성하지 않음"
+        type: boolean
+        default: true
+
+permissions:
+  contents: write   # 릴리즈 + 태그 생성
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  guard:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: Checkout
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5  # v4.3.1
+      - name: Set up uv
+        uses: astral-sh/setup-uv@fac544c07dec837d0ccb6301d7b5580bf5edae39  # v8.2.0
+        with:
+          enable-cache: true
+      - name: Verify locked dependency integrity (pinned hashes)
+        run: uv sync --frozen --no-install-project
+      - name: Audit known vulnerabilities (OSV)
+        run: uv audit
+      - name: Scan for malicious packages (GuardDog, advisory)
+        continue-on-error: true
+        run: |
+          uv export --frozen --no-dev --no-emit-project --no-hashes --format requirements-txt -o requirements-export.txt
+          uvx guarddog==2.9.0 pypi verify requirements-export.txt
+
+  decide:
+    needs: guard
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.v.outputs.version }}
+      should_release: ${{ steps.v.outputs.should_release }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5  # v4.3.1
+      - name: Determine version and whether a release is needed
+        id: v
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          VERSION=$(sed -n 's/^version *= *"\(.*\)"/\1/p' pyproject.toml | head -n1)
+          if [ -z "$VERSION" ]; then
+            echo "::error::pyproject.toml 에서 version 을 찾지 못함"; exit 1
+          fi
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+          if gh release view "v$VERSION" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            echo "ℹ️ v$VERSION 릴리즈가 이미 존재 — 변경 없음, 스킵."
+            echo "should_release=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "🆕 v$VERSION — 신규 릴리즈 진행."
+            echo "should_release=true" >> "$GITHUB_OUTPUT"
+          fi
+
+  build:
+    needs: [guard, decide]
+    if: needs.decide.outputs.should_release == 'true' || github.event_name == 'workflow_dispatch'
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            asset: keepassdiff2-${{ needs.decide.outputs.version }}-linux-x86_64
+          - os: windows-latest
+            asset: keepassdiff2-${{ needs.decide.outputs.version }}-windows-x86_64
+          - os: macos-latest
+            asset: keepassdiff2-${{ needs.decide.outputs.version }}-macos-arm64
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 30
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - name: Checkout
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5  # v4.3.1
+      - name: Set up uv
+        uses: astral-sh/setup-uv@fac544c07dec837d0ccb6301d7b5580bf5edae39  # v8.2.0
+        with:
+          enable-cache: true
+      - name: Sync (frozen)
+        run: uv sync --frozen
+      - name: Build single-file executable (flet pack)
+        run: uv run --with pyinstaller flet pack main.py --name keepassdiff2
+      - name: Package dist into a zip
+        run: uv run python -c "import shutil; shutil.make_archive('${{ matrix.asset }}', 'zip', 'dist')"
+      - name: Upload build artifact
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: ${{ matrix.asset }}
+          path: ${{ matrix.asset }}.zip
+          if-no-files-found: error
+
+  release:
+    needs: [decide, build]
+    if: needs.decide.outputs.should_release == 'true' && (github.event_name == 'push' || github.event.inputs.dry_run == 'false')
+    runs-on: ubuntu-latest
+    steps:
+      - name: Download all build artifacts
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c  # v8.0.1
+        with:
+          path: artifacts
+      - name: Create GitHub Release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          VERSION: ${{ needs.decide.outputs.version }}
+        run: |
+          gh release create "v$VERSION" \
+            $(find artifacts -name '*.zip') \
+            --repo "$GITHUB_REPOSITORY" \
+            --target "$GITHUB_SHA" \
+            --title "v$VERSION" \
+            --notes "Automated release for v$VERSION — 공급망 게이트(uv audit + 무결성) 통과 후 빌드된 단일 실행파일."
