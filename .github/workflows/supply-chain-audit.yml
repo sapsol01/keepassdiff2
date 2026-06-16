@@ -1,0 +1,53 @@
+# 공급망 보안 점검: 의존성의 알려진 취약점(uv audit) + 악성 패키지 정적 탐지(GuardDog).
+#
+#   ① uv sync --frozen : 락된 해시로 무결성 검증 → 레지스트리 변조 차단  [하드 게이트]
+#   ② uv audit         : uv.lock 을 OSV 에 조회 → 알려진 취약점(CVE) 탐지   [하드 게이트]
+#   ③ GuardDog         : PyPI 패키지를 설치 없이 정적 분석 → 악성코드/타이포
+#                        스쿼팅/install-time 실행 등 공급망 공격 지표 탐지   [자문]
+#
+# ①②는 발견 시 잡이 실패하여 병합 게이트로 동작합니다.
+# ③ GuardDog 는 휴리스틱 오탐(예: pycryptodomex 의 getattr/CDLL)이 잦아 자문으로
+#   둡니다 — 발견 항목은 로그에 남지만 빌드를 막지 않으며, 악성 여부의 최종 판단은
+#   pre-merge-review(AI 가드)와 사람 검토에 맡깁니다. 하드 게이트로 바꾸려면
+#   `uvx guarddog ... verify --exit-code` 로 변경하세요.
+# 액션과 도구는 supply-chain 안전을 위해 SHA / 버전으로 핀합니다.
+
+name: supply-chain-audit
+
+on:
+  push:
+    branches: [main]
+  pull_request: {}
+
+permissions:
+  contents: read
+
+concurrency:
+  group: supply-chain-audit-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  audit:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: Checkout
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5  # v4.3.1
+
+      - name: Set up uv
+        uses: astral-sh/setup-uv@fac544c07dec837d0ccb6301d7b5580bf5edae39  # v8.2.0
+        with:
+          enable-cache: true
+
+      - name: Verify locked dependency integrity (pinned hashes)
+        run: uv sync --frozen --no-install-project
+
+      - name: Audit known vulnerabilities (OSV)
+        run: uv audit
+
+      - name: Export pinned requirements for malware scan
+        run: uv export --frozen --no-dev --no-emit-project --no-hashes --format requirements-txt -o requirements-export.txt
+
+      - name: Scan for malicious packages (GuardDog, advisory)
+        continue-on-error: true   # 자문: 발견 항목은 로그에 남기되 빌드는 막지 않음
+        run: uvx guarddog==2.9.0 pypi verify requirements-export.txt
