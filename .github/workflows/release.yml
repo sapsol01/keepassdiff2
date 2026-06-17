@@ -106,8 +106,13 @@ jobs:
           enable-cache: true
       - name: Sync (frozen)
         run: uv sync --frozen
+      - name: Install packaging tools (flet-cli + pyinstaller)
+        # flet-cli 를 미리 설치해 둠 — 그래야 flet pack 이 실행 중 flet-cli 를 자체
+        # 재설치하지 않는다. (Windows 에서는 실행 중인 flet.exe 를 덮어쓰지 못해
+        # "Access is denied (os error 5)" 로 실패하던 원인)
+        run: uv pip install pyinstaller flet-cli
       - name: Build single-file executable (flet pack)
-        run: uv run --with pyinstaller flet pack main.py --name keepassdiff2
+        run: uv run flet pack main.py --name keepassdiff2
       - name: Package dist into a zip
         run: uv run python -c "import shutil; shutil.make_archive('${{ matrix.asset }}', 'zip', 'dist')"
       - name: Upload build artifact
